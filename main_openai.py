@@ -1,6 +1,4 @@
 import sys
-
-from src.tts import script_to_speech   # Typecast 버전
 from pathlib import Path
 
 from src.transcriber import transcribe_audio
@@ -63,6 +61,10 @@ def step2_rewrite(audio_stem: str | None = None) -> Path:
 
 
 def step3_tts(audio_stem: str | None = None) -> list[Path]:
+    """
+    3단계: rich_mindset.txt -> TTS(mp3) (음성만)
+    - audio_stem이 None이면 INPUT_AUDIO.stem 사용
+    """
     OUTPUT_DIR.mkdir(exist_ok=True)
 
     if audio_stem is None:
@@ -76,24 +78,18 @@ def step3_tts(audio_stem: str | None = None) -> list[Path]:
             f"재작성 단계를 실행해야 합니다."
         )
 
-    print(f"[STEP 3] rich_mindset.txt -> Typecast TTS")
+    print(f"[STEP 3] rich_mindset.txt -> TTS")
     print(f"[INFO] 입력 재작성본: {rewritten_path}")
 
     rewritten_text = rewritten_path.read_text(encoding="utf-8")
 
-    # 확장자는 script_to_speech 안에서 audio_format 기준으로 붙이니까 .mp3 없이 stem만 사용
-    tts_base_path = OUTPUT_DIR / f"{audio_stem}_rich_mindset_ko_male"
-
+    tts_base_path = OUTPUT_DIR / f"{audio_stem}_rich_mindset_ko_male.mp3"
     tts_files = script_to_speech(
         rewritten_text,
         tts_base_path,
-        # 여기서 톤/감정/속도 튜닝 가능
-        emotion_preset="normal",     # 진중한 강의 느낌이면 normal + 살짝 intensity 낮게
-        emotion_intensity=0.8,
-        volume=110,
-        audio_pitch=-1,
-        audio_tempo=1.0,
-        audio_format="mp3",
+        model="gpt-4o-mini-tts",
+        voice="onyx",
+        instructions="진중한 톤의 한국인 자연스러운 톤으로, 차분하지만 정말 인간이 읽는 것 처럼 때론 감정적으로 읽어 주세요.",
     )
 
     print("[INFO] 생성된 TTS 파일들:")
