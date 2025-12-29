@@ -1,0 +1,171 @@
+from pathlib import Path
+from PIL import Image, ImageDraw, ImageFont
+import textwrap
+
+OUTPUT_DIR = Path("outputs")
+
+
+def find_first_scene_image(images_dir: Path) -> Path:
+    exts = ("*.png", "*.jpg", "*.jpeg", "*.webp")
+    files = []
+    for ext in exts:
+        files += list(images_dir.glob(ext))
+
+    if not files:
+        raise FileNotFoundError(f"scene 이미지가 없습니다: {images_dir}")
+
+    return sorted(files, key=lambda p: p.name)[0]
+
+
+def load_bold_font(size: int) -> ImageFont.FreeTypeFont:
+    # Noto CJK TTC는 "index"가 중요 (보통 0이 한글 포함)
+    candidates = [
+        ("ttc", "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc", 0),
+        ("ttf", "/usr/share/fonts/truetype/nanum/NanumGothicExtraBold.ttf", None),
+        ("ttf", "/usr/share/fonts/truetype/nanum/NanumGothicBold.ttf", None),
+        ("ttf", "fonts/NanumGothic-Bold.ttf", None),
+    ]
+
+    for kind, p, idx in candidates:
+        try:
+            if Path(p).exists():
+                if kind == "ttc":
+                    font = ImageFont.truetype(p, size, index=idx)
+                else:
+                    font = ImageFont.truetype(p, size)
+                print(f"[THUMBNAIL] font loaded: {p} (size={size})")
+                return font
+        except Exception as e:
+            print(f"[THUMBNAIL] font load failed: {p} ({e})")
+
+    print("⚠️ [THUMBNAIL] BOLD FONT NOT FOUND → DEFAULT FONT USED")
+    return ImageFont.load_default()
+
+
+def wrap_two_lines(text: str, draw: ImageDraw.ImageDraw, font, max_width: int):
+    text = text.strip()
+
+    if "\n" in text:
+        parts = [p.strip() for p in text.split("\n") if p.strip()]
+        return (parts + ["", ""])[:2]
+
+    approx = max(8, len(text) // 2)
+    wrapped = textwrap.wrap(text, width=approx)
+
+    if len(wrapped) == 1:
+        return wrapped[0], ""
+
+    line1 = wrapped[0]
+    line2 = " ".join(wrapped[1:])
+
+    while draw.textlength(line2, font=font) > max_width and len(line2) > 1:
+        line2 = line2[:-1]
+
+    return line1, line2
+
+
+def make_thumbnail(audio_stem: str, text: str) -> Path:
+    images_dir = OUTPUT_DIR / f"{audio_stem}_images"
+    base_img_path = find_first_scene_image(images_dir)
+
+    img = Image.open(base_img_path).convert("RGBA")
+    W, H = img.size
+
+    # 하단 검정 박스
+    box_h = int(H * 0.26)
+    box_y = H - box_h
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle([(0, box_y), (W, H)], fill=(0, 0, 0, 255))
+
+    # 패딩
+    pad_x = int(W * 0.05)
+    pad_bottom = int(box_h * 0.16)
+    max_w = W - pad_x * 2
+
+    # 색상
+    color_line1 = (255, 255, 255, 255)   # 흰색
+    color_line2 = (255, 215, 0, 255)     # 노란색
+
+    font_size = int(H * 0.20)
+    gap_ratio = 0.15
+
+    tmp_draw = ImageDraw.Draw(img)
+
+    # 박스에 맞게 폰트 자동 축소
+    while True:
+        font = load_bold_font(font_size)
+        gap = int(font_size * gap_ratio)
+
+        line1, line2 = wrap_two_lines(text, tmp_draw, font, max_w)
+
+        def text_h(t):
+            if not t:
+                return 0
+            b = tmp_draw.textbbox((0, 0), t, font=font)
+            return b[3] - b[1]
+
+        h1 = text_h(line1)
+        h2 = text_h(line2)
+        total_h = h1 + h2 + (gap if line2 else 0)
+
+        if total_h <= box_h * 0.8:
+            break
+
+        font_size = int(font_size * 0.95)
+        if font_size < 40:
+            break
+
+    # 세로 위치 (하단 padding 반영)
+    y = box_y + (box_h - total_h - pad_bottom) // 2
+
+    def center_x(t):
+        return int((W - tmp_draw.textlength(t, font=font)) / 2)
+
+    # 텍스트 렌더
+    if line1:
+        draw.text(
+            (center_x(line1), y),
+            line1,
+            font=font,
+            fill=color_line1,
+        )
+
+    if line2:
+        draw.text(
+            (center_x(line2), y + h1 + gap),
+            line2,
+            font=font,
+            fill=color_line2,
+        )
+
+    out = Image.alpha_composite(img, overlay).convert("RGB")
+
+    # ✅ 유튜브 썸네일 표준 해상도
+    THUMB_W, THUMB_H = 1280, 720
+    out = out.resize((THUMB_W, THUMB_H), Image.LANCZOS)
+
+    out_path = OUTPUT_DIR / f"{audio_stem}_thumbnail.jpg"
+
+    # ✅ 2MB 이하가 될 때까지 자동 품질 조절
+    quality = 92
+    while True:
+        out.save(
+            out_path,
+            format="JPEG",
+            quality=quality,
+            optimize=True,
+            subsampling=2,
+        )
+
+        if out_path.stat().st_size <= 2 * 1024 * 1024:
+            break
+
+        quality -= 5
+        if quality < 50:
+            break
+
+    print(f"[DONE] thumbnail saved: {out_path} ({out_path.stat().st_size // 1024} KB)")
+    return out_path
+

@@ -1,0 +1,312 @@
+# src/video_renderer.py
+from __future__ import annotations
+
+import base64
+import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from dotenv import load_dotenv
+from openai import OpenAI
+
+# -------------------------------------------------------------------
+# 환경 설정
+# -------------------------------------------------------------------
+load_dotenv()
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# OpenAI 이미지 모델 (환경변수로 바꿀 수 있게)
+DEFAULT_IMAGE_MODEL = os.getenv("OPENAI_IMAGE_MODEL", "dall-e-3")
+
+
+# -------------------------------------------------------------------
+# 내부 유틸
+# -------------------------------------------------------------------
+def _run(cmd: list[str]) -> None:
+    """ffmpeg 등의 커맨드를 실행하고 실패하면 예외를 터뜨립니다."""
+    print("[CMD]", " ".join(cmd))
+    subprocess.run(cmd, check=True)
+
+
+def _ensure_ffmpeg() -> None:
+    """ffmpeg가 설치되어 있는지 확인합니다."""
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("ffmpeg를 찾을 수 없습니다. ffmpeg 설치 후 PATH에 등록하세요.")
+
+
+def load_scene_plan(scene_plan_filled_path: Path) -> Dict[str, Any]:
+    """scene_plan_filled.json 로드"""
+    data = json.loads(scene_plan_filled_path.read_text(encoding="utf-8"))
+    if "scenes" not in data:
+        raise ValueError("scene_plan_filled.json에 scenes가 없습니다.")
+    return data
+
+
+# -------------------------------------------------------------------
+# 1) 이미지 생성
+# -------------------------------------------------------------------
+def generate_scene_images(
+    scene_plan_filled_path: Path,
+    images_dir: Path,
+    *,
+    size: str = "1792x1024",
+    #size: str = "1536x1024",  # 가로형(16:9에 가장 근접)
+    overwrite: bool = False,
+) -> List[Path]:
+    """
+    scene_plan_filled.json의 image_prompt로 장면별 PNG 생성.
+
+    출력:
+      images_dir/scene_0001.png
+      images_dir/scene_0002.png
+      ...
+    """
+    images_dir.mkdir(parents=True, exist_ok=True)
+    data = load_scene_plan(scene_plan_filled_path)
+    scenes = data["scenes"]
+
+    out_paths: List[Path] = []
+    for s in scenes:
+        scene_id = int(s["id"])
+        prompt = s.get("image_prompt")
+        if not prompt:
+            raise ValueError(f"scene {scene_id}에 image_prompt가 없습니다.")
+
+        out_path = images_dir / f"scene_{scene_id:04d}.png"
+        out_paths.append(out_path)
+
+        if out_path.exists() and not overwrite:
+            print(f"[SKIP] image exists: {out_path.name}")
+            continue
+
+        print(f"[IMG] generating scene {scene_id} -> {out_path.name}")
+
+        # OpenAI Images API: base64 PNG 반환
+        img = client.images.generate(
+            model=DEFAULT_IMAGE_MODEL,
+            prompt=str(prompt),
+            size=size,
+        )
+                
+        item = img.data[0]
+        # 1) b64_json이 있으면 그걸로 저장 (gpt-image 계열에서 주로 사용)
+        if getattr(item, "b64_json", None):
+            b64 = item.b64_json
+            png_bytes = base64.b64decode(b64)
+            out_path.write_bytes(png_bytes)
+        # 2) 없으면 url로 내려받아 저장 (dall-e-3 등에서 주로 사용)
+        elif getattr(item, "url", None):
+            import urllib.request
+            urllib.request.urlretrieve(item.url, out_path)
+        else:
+            raise RuntimeError("이미지 응답에 b64_json/url이 모두 없습니다. 응답 포맷을 확인하세요.")
+    
+    return out_paths
+
+
+# -------------------------------------------------------------------
+# 2) 오디오 concat (part1~n 이어붙이기)
+# -------------------------------------------------------------------
+def concat_audio_mp3(audio_parts: List[Path], out_path: Path) -> Path:
+    """
+    mp3 part1~n을 ffmpeg concat demuxer로 이어붙입니다.
+
+    -c copy 로 시도 -> 실패하면 재인코딩(libmp3lame) fallback.
+    """
+    _ensure_ffmpeg()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ffmpeg concat용 리스트 파일
+    lst = out_path.parent / "audio_concat_list.txt"
+    lines = [f"file '{p.resolve()}'" for p in audio_parts]
+    lst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    try:
+        _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out_path)])
+    except subprocess.CalledProcessError:
+        # 포맷/코덱이 조금이라도 다르면 copy가 실패할 수 있음 -> 재인코딩
+        _run([
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", str(lst),
+            "-c:a", "libmp3lame", "-q:a", "2",
+            str(out_path),
+        ])
+
+    return out_path
+
+
+# -------------------------------------------------------------------
+# 3) 장면별 클립 생성 (이미지 + Ken Burns)
+# -------------------------------------------------------------------
+def render_scene_clips(
+    scene_plan_filled_path: Path,
+    images_dir: Path,
+    clips_dir: Path,
+    *,
+    fps: int = 30,
+    width: int = 1920,
+    height: int = 1080,
+    enable_zoom: bool = False,      # ✅ 흔들리면 False로 바로 끄기
+    zoom_end: float = 1.04,        # 최종 확대 배율 (느리게)
+    zoom_step: float = 0.00035,    # 프레임당 줌 증가 (느리게)
+    overwrite: bool = False,
+) -> List[Path]:
+    """
+    각 장면:
+      scene_0001.png를 duration만큼 loop
+      -> (옵션) zoompan Ken Burns
+      -> clip_0001.mp4 생성
+
+    ✅ 흔들림 최소화 포인트
+    - x/y 짝수 스냅(2px 점프)을 제거하고, center를 연속값으로 유지
+    - overscan에서 zoom 수행 후 최종 s=1920x1080 고정
+    - 마지막에 yuv420p 변환
+    - 그래도 싫으면 enable_zoom=False로 기능 제거
+    """
+    _ensure_ffmpeg()
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    data = load_scene_plan(scene_plan_filled_path)
+    scenes = data["scenes"]
+
+    out_paths: List[Path] = []
+    for s in scenes:
+        scene_id = int(s["id"])
+        dur = float(s["duration"])
+
+        img_path = images_dir / f"scene_{scene_id:04d}.png"
+        if not img_path.exists():
+            raise FileNotFoundError(f"이미지가 없습니다: {img_path}")
+
+        clip_path = clips_dir / f"clip_{scene_id:04d}.mp4"
+        out_paths.append(clip_path)
+
+        if clip_path.exists() and not overwrite:
+            print(f"[SKIP] clip exists: {clip_path.name}")
+            continue
+
+        frames = max(1, int(dur * fps))
+
+        if enable_zoom and zoom_end > 1.0 and zoom_step > 0:
+            # ✅ 흔들림 최소화 Ken Burns (스냅 제거: 연속 center 유지)
+            # - overscan에서 zoom -> 최종 출력 s 고정
+            vf = (
+                f"scale=2400:1350:force_original_aspect_ratio=increase,"
+                f"crop=2400:1350,"
+                f"zoompan="
+                f"z='min(zoom+{zoom_step},{zoom_end})':"
+                f"x='(iw-iw/zoom)/2':"
+                f"y='(ih-ih/zoom)/2':"
+                f"d={frames}:s={width}x{height},"
+                f"fps={fps},"
+                f"format=yuv420p"
+            )
+        else:
+            # ✅ 줌 기능 제거 버전 (가장 안정적)
+            vf = (
+                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},"
+                f"fps={fps},"
+                f"format=yuv420p"
+            )
+
+        _run([
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", str(img_path),
+            "-t", f"{dur:.3f}",
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "medium", "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            str(clip_path),
+        ])
+
+    return out_paths
+
+
+# -------------------------------------------------------------------
+# 4) 클립 concat (무음 영상 만들기)
+# -------------------------------------------------------------------
+def concat_video_clips(clips: List[Path], out_path: Path) -> Path:
+    """
+    clip_0001.mp4 ... 를 concat demuxer로 합쳐 하나의 video.mp4 생성 (무음).
+    """
+    _ensure_ffmpeg()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    lst = out_path.parent / "video_concat_list.txt"
+    lines = [f"file '{p.resolve()}'" for p in clips]
+    lst.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    # 모두 동일 파라미터로 인코딩했으니 stream copy로 빠르게 concat
+    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out_path)])
+    return out_path
+
+
+# -------------------------------------------------------------------
+# 5) 최종 mux (영상 + 오디오 + 자막)
+# -------------------------------------------------------------------
+def mux_final(
+    video_path: Path,
+    audio_path: Path,
+    out_path: Path,
+    *,
+    subtitles_srt: Path | None = None,
+    burn_subtitles: bool = True,
+    subtitle_style: str = "Fontsize=28,Outline=2,Shadow=1,MarginV=40",
+) -> Path:
+    """
+    video + audio mux.
+    - burn_subtitles=True: 자막 번인(픽셀로 박음)
+    - False: mp4 자막 트랙(mov_text)으로 포함
+    """
+    _ensure_ffmpeg()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # ✅ 디버그: 자막이 실제로 전달/존재하는지 로그로 확인
+    if subtitles_srt is not None:
+        print("[INFO] subtitles_srt =", subtitles_srt, "exists =", subtitles_srt.exists())
+
+    if subtitles_srt and burn_subtitles:
+        # ✅ 경로 안정화(공백/특수문자 대비): POSIX + 따옴표 감싸기
+        sub_path = subtitles_srt.resolve().as_posix()
+        vf = f"subtitles='{sub_path}':force_style='{subtitle_style}'"
+
+        _run([
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-vf", vf,
+            "-c:v", "libx264", "-crf", "18", "-preset", "medium",
+            "-c:a", "aac", "-b:a", "192k",
+            "-shortest",
+            str(out_path),
+        ])
+        return out_path
+
+    if subtitles_srt and not burn_subtitles:
+        _run([
+            "ffmpeg", "-y",
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-i", str(subtitles_srt),
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "192k",
+            "-c:s", "mov_text",
+            "-shortest",
+            str(out_path),
+        ])
+        return out_path
+
+    _run([
+        "ffmpeg", "-y",
+        "-i", str(video_path),
+        "-i", str(audio_path),
+        "-c:v", "copy",
+        "-c:a", "aac", "-b:a", "192k",
+        "-shortest",
+        str(out_path),
+    ])
+    return out_path
