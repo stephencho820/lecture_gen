@@ -5,16 +5,16 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-from openai import OpenAI
+import openai
+from openai.error import OpenAIError
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 DEFAULT_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-
 
 STYLE_RULES = """
 공통 스타일 규칙(반드시 지켜):
@@ -57,16 +57,19 @@ def _call_prompt_llm(scene_script: str, *, scene_id: int) -> Dict[str, Any]:
 {OUTPUT_FORMAT}
 """.strip()
 
-    resp = client.chat.completions.create(
-        model=DEFAULT_CHAT_MODEL,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        temperature=0.7,
-    )
+    try:
+        resp = openai.ChatCompletion.create(
+            model=DEFAULT_CHAT_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature=0.7,
+        )
+    except OpenAIError as e:
+        raise RuntimeError(f"OpenAI API error: {e}")
 
-    content = resp.choices[0].message.content.strip()
+    content = resp.choices[0].message["content"].strip()
     data = json.loads(content)  # JSON only 강제
 
     # 최소 방어
@@ -74,13 +77,14 @@ def _call_prompt_llm(scene_script: str, *, scene_id: int) -> Dict[str, Any]:
         if k not in data:
             raise ValueError(f"모델 응답에 '{k}'가 없습니다: {data}")
 
-    # image_prompt에 필수 안전장치 삽입(혹시 누락되면 덧붙임)
+    # image_prompt에 필수 안전장치 삽입
     ip = str(data["image_prompt"]).strip()
     must = ["16:9", "realistic", "cinematic", "no text", "no numbers", "no logos", "no watermark"]
     for m in must:
         if m.lower() not in ip.lower():
             ip += f", {m}"
     data["image_prompt"] = ip
+
     return data
 
 
@@ -90,10 +94,6 @@ def fill_scene_prompts(
     overwrite: bool = False,
     sleep_sec: float = 0.3,
 ) -> Path:
-    """
-    scene_plan.json을 읽어 null 필드를 채운 뒤 *_scene_plan_filled.json 저장
-    overwrite=False: 이미 값이 있으면 유지 (재실행/재개에 유리)
-    """
     payload = json.loads(scene_plan_path.read_text(encoding="utf-8"))
     scenes: List[Dict[str, Any]] = payload.get("scenes", [])
     if not scenes:

@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
-from openai import OpenAI, OpenAIError
+import openai
+from openai.error import OpenAIError
 from pydub import AudioSegment
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
-# ✅ timestamp 필요할 땐 whisper-1 사용 (verbose_json + segments 지원)
+# whisper timestamp 전사
 DEFAULT_TS_MODEL = "whisper-1"
 
 
@@ -38,7 +39,8 @@ def transcribe_single_file_timestamped(
 ) -> Dict[str, Any]:
     """
     단일 파일을 timestamp 포함으로 전사.
-    whisper-1: verbose_json + timestamp_granularities 로 segments 확보 가능.
+    openai==0.28.1 기준:
+    - response_format="verbose_json" → segments 자동 포함
     """
     last_error: Exception | None = None
 
@@ -46,36 +48,26 @@ def transcribe_single_file_timestamped(
         try:
             print(f"[INFO] timestamp 전사 시도 {attempt}/{max_retries} ... ({audio_path})")
             with open(audio_path, "rb") as f:
-                result = client.audio.transcriptions.create(
+                data = openai.Audio.transcribe(
                     model=model,
                     file=f,
                     language=language,
                     response_format="verbose_json",
-                    # ✅ segments 타임스탬프 활성화
-                    timestamp_granularities=["segment"],
                 )
-
-            # SDK가 dict/객체 어느 형태로 올지 방어
-            data = result if isinstance(result, dict) else getattr(result, "model_dump", lambda: {})()
-            if not data:
-                data = {
-                    "text": getattr(result, "text", ""),
-                    "segments": getattr(result, "segments", None),
-                }
 
             segments_raw = data.get("segments")
             if not segments_raw:
-                raise RuntimeError(
-                    "verbose_json 응답에서 segments를 찾지 못했습니다. "
-                    "timestamp_granularities 설정 또는 모델을 확인하세요."
-                )
+                raise RuntimeError("verbose_json 응답에서 segments를 찾지 못했습니다.")
 
             segments: List[Segment] = []
             for s in segments_raw:
-                start = s["start"] if isinstance(s, dict) else getattr(s, "start")
-                end = s["end"] if isinstance(s, dict) else getattr(s, "end")
-                text = s["text"] if isinstance(s, dict) else getattr(s, "text")
-                segments.append(Segment(float(start), float(end), str(text).strip()))
+                segments.append(
+                    Segment(
+                        start=float(s["start"]),
+                        end=float(s["end"]),
+                        text=str(s["text"]).strip(),
+                    )
+                )
 
             full_text = data.get("text") or "\n".join(seg.text for seg in segments)
 
@@ -88,7 +80,7 @@ def transcribe_single_file_timestamped(
         except OpenAIError as e:
             last_error = e
             print(f"[WARN] timestamp 전사 오류 (시도 {attempt}): {e}")
-            if hasattr(e, "status") and getattr(e, "status", 500) < 500:
+            if hasattr(e, "http_status") and getattr(e, "http_status", 500) < 500:
                 print("[ERROR] 클라이언트 오류(4xx)로 재시도하지 않습니다.")
                 break
             if attempt < max_retries:
@@ -103,7 +95,10 @@ def transcribe_single_file_timestamped(
     raise RuntimeError(f"timestamp 전사 실패. 마지막 오류: {last_error}") from last_error
 
 
-def merge_timestamped_parts(part_results: List[Dict[str, Any]], part_paths: List[Path]) -> Dict[str, Any]:
+def merge_timestamped_parts(
+    part_results: List[Dict[str, Any]],
+    part_paths: List[Path],
+) -> Dict[str, Any]:
     if len(part_results) != len(part_paths):
         raise ValueError("part_results와 part_paths 길이가 일치해야 합니다.")
 

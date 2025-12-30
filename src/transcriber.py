@@ -4,11 +4,12 @@ from pathlib import Path
 from typing import List
 
 from dotenv import load_dotenv
-from openai import OpenAI, OpenAIError
+import openai
+from openai.error import OpenAIError
 from pydub import AudioSegment
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 def split_audio(
@@ -48,6 +49,7 @@ def transcribe_single_file(
 ) -> str:
     """
     단일 오디오 파일에 대해 STT 수행 (리트라이 포함).
+    openai==0.28.1 기준.
     """
     last_error: Exception | None = None
 
@@ -55,23 +57,20 @@ def transcribe_single_file(
         try:
             print(f"[INFO] 전사 시도 {attempt}/{max_retries} ... ({audio_path})")
             with open(audio_path, "rb") as f:
-                transcription = client.audio.transcriptions.create(
-                    model="gpt-4o-mini-transcribe",
+                text = openai.Audio.transcribe(
+                    model="whisper-1",
                     file=f,
                     language=language,
                     response_format="text",
                 )
 
             print("[INFO] 전사 성공")
-            if isinstance(transcription, str):
-                return transcription
-            else:
-                return transcription.text
+            return text.strip()
 
         except OpenAIError as e:
             last_error = e
             print(f"[WARN] 전사 중 오류 발생 (시도 {attempt}): {e}")
-            if hasattr(e, "status") and getattr(e, "status", 500) < 500:
+            if hasattr(e, "http_status") and getattr(e, "http_status", 500) < 500:
                 print("[ERROR] 클라이언트 오류(4xx)로 재시도하지 않습니다.")
                 break
 

@@ -1,10 +1,11 @@
 import os
 
 from dotenv import load_dotenv
-from openai import OpenAI
+import openai
+from openai.error import OpenAIError
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
 def rewrite_for_rich_mindset_channel(original_script: str) -> str:
@@ -15,77 +16,35 @@ def rewrite_for_rich_mindset_channel(original_script: str) -> str:
     - 예시/스토리: 전부 새로 구성
     - 톤: 기존과 비슷한 톤으로 구성 (이건 강의가 아님. 생각을 전달하는 유투브 채널임)
     - 반드시 지켜야하는 룰: 스크립트를 tts로 변환하기 때문에 '1.'과 같은 bullet을 사용하면 안되고 '첫째'라고 표현해야함.
-    로 재작성된 스크립트를 생성. '강의'라는 표현 금지. '오늘'이라는 표현 금지 
+    - '강의', '오늘'이라는 표현 금지
     """
     original_len = len(original_script)
 
     system_prompt = """
 당신은 '부자의 사고법' 유튜브 채널을 위한 전문 스토리텔러입니다.
-
-역할:
-- 입력으로 들어오는 텍스트는 어떤 유투버 전사본입니다. 비슷한 톤과 매너, 지식수준은 유지하나 예시나 순서는 바꿔도 됩니다.
-- 동일한 주제와 핵심 지식을 유지하여 설계합니다.
-- 구체적인 문장 구조나 표현, 예시가 원본과 '똑같이' 나오지 않도록 주의합니다.
-
-톤 & 스타일:
-- 부자 마인드, 자산가의 사고방식, 장기적인 관점, 시스템/습관 중심의 메시지를 강조합니다.
-- 자극적인 '한 방', '단기간 폭발 투기 수익'보다는, 사고방식과 원칙, 태도, 가치투자, 분석기반을 강조합니다.
-- 시청자가 '지적 쾌감'과 '통찰'을 느끼도록, 차분하고 공감할 수 있는 말투로 작성합니다.
-- 2인칭(여러분, 당신)을 사용해 카메라를 보고 말하는 듯한 강의 스크립트 형태로 써 주세요.
-- 한국어로 작성합니다.
-
-사실성:
-- 새로운 정보를 추가할 때는, 일반적으로 널리 알려진 심리학/경제학/재테크 상식 수준에서만 추가합니다.
-- 구체적인 숫자, 통계, 연도, 기관명 등은 모르면 만들어내지 말고, 대신 '예를 들어', '어떤 사람은' 등 일반적인 묘사만 사용합니다.
-- 위험하거나 검증되지 않은 재테크/투자 조언은 피하고, 사고방식과 원칙 위주로 설명합니다.
-- 주제에 맞는 지표나 요즘 뉴스를 인용하며 작성하면 훨신더 좋습니다.
-"""
+...
+""".strip()
 
     user_prompt = f"""
-다음 텍스트는 하나의 강의를 전사한 원본 스크립트입니다.
-이걸 바탕으로, '부자의 사고법' 유튜브 채널에 올릴
-완전히 새로운 스토리 텔링 스크립트를 만들어 주세요.
-
-필수 조건:
-1) 분량
-   - 입력 스크립트 길이는 대략 {original_len}자입니다.
-   - 출력 스크립트는 0.9배 ~ 1.1배 분량으로 유지해 주세요.
-   - 너무 짧게 요약하지 말고, 천천히 내용을 정확히 전달한다고 생각하고 작성하세요.
-
-2) 내용
-   - 원본 강의에서 전달하는 핵심 개념과 지식은 빠뜨리지 말고 모두 포함합니다.
-   - 이해를 돕기 위해, 필요하다면 개념 설명을 조금 더 자세히 보강해도 좋습니다.
-
-3) 예시/비유
-   - 원본 강의에 등장하는 구체적인 예시, 스토리, 비유는 그대로 쓰지 말고,
-     같은 메시지를 전달할 수 있는 새로운 예시와 비유로 재구성하세요.
-   - 직장인, 자영업자, 투자자 등 현실적인 인물/상황 예시를 섞어 주면 좋습니다.
-
-4) 구조
-   - 도입: 시청자의 귀를 잡아끄는 질문 또는 문제의식 제기
-   - 본론: 3~5개의 핵심 포인트로 나누어 논리적으로 전개 (bullet point를 만들면 안됨. 쭉 설명할 수 있게 작성)
-   - 마무리: 오늘 강의의 핵심 메시지를 한두 문단으로 정리하고,
-             시청자가 행동으로 옮길 수 있는 간단한 실천 포인트 제시
-
-5) 형식
-   - 유튜브 스크립트처럼, 말하듯이 자연스럽게 써 주세요.
-   - '첫 번째로', '정리해보면' 같은 말로 흐름을 정리해 주면 좋습니다.
-   - 맨마지막 맨트는 항상 "구독과 좋아요는 저에게 힘이 되고 채널의 연구 발전에 도움이됩니다. 더 좋은 정보로 찾아뵙겠습니다. 부자되세요. 감사합니다." 로 마무리해줘
-
+다음 텍스트는 하나의 스토리를 전사한 원본 스크립트입니다.
+...
 [원본 스크립트]
 --------------------
 {original_script}
 --------------------
-"""
+""".strip()
 
-    response = client.chat.completions.create(
-        model="gpt-4.1-mini",
-        messages=[
-            {"role": "system", "content": system_prompt.strip()},
-            {"role": "user", "content": user_prompt.strip()},
-        ],
-        temperature=0.8,
-        max_completion_tokens=8000,
-    )
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-4.1-mini",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.8,
+            max_tokens=8000,
+        )
+    except OpenAIError as e:
+        raise RuntimeError(f"OpenAI API error: {e}")
 
-    return response.choices[0].message.content
+    return response.choices[0].message["content"]
