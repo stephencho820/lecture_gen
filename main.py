@@ -5,7 +5,6 @@ from glob import glob
 
 from src.transcriber import transcribe_audio
 from src.rewriter import rewrite_for_rich_mindset_channel
-from src.tts import script_to_speech
 
 from src.transcriber_timestamped import transcribe_parts_timestamped
 from src.subtitles import segments_to_srt
@@ -96,6 +95,8 @@ def step2_rewrite(audio_stem: str) -> Path:
 # STEP 3 – TTS (Codespaces)
 # -------------------------------------------------------------------
 def step3_tts(audio_stem: str):
+    from src.tts import script_to_speech
+
     src = OUTPUT_DIR / f"{audio_stem}_rich_mindset.txt"
     if not src.exists():
         raise FileNotFoundError(src)
