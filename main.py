@@ -26,7 +26,25 @@ from src.video_renderer import (
     mux_final,
 )
 
+def safe_unlink(path: Path):
+    try:
+        if path.exists():
+            path.unlink()
+            print(f"[CLEANUP] 삭제: {path}")
+    except Exception as e:
+        print(f"[WARN] 파일 삭제 실패: {path} ({e})")
 
+
+def safe_rmtree(dir_path: Path):
+    try:
+        if dir_path.exists() and dir_path.is_dir():
+            for p in dir_path.rglob("*"):
+                if p.is_file():
+                    p.unlink()
+            dir_path.rmdir()
+            print(f"[CLEANUP] 디렉토리 삭제: {dir_path}")
+    except Exception as e:
+        print(f"[WARN] 디렉토리 삭제 실패: {dir_path} ({e})")
 
 # -------------------------------------------------------------------
 # 🔧 파일 번호 선택 기능 추가
@@ -174,6 +192,9 @@ def step4_timestamp_stt_from_tts(audio_stem: str) -> tuple[Path, Path]:
     srt_path.write_text(srt_text, encoding="utf-8")
     print(f"[INFO] SRT 저장: {srt_path}")
 
+    for p in part_paths:
+        safe_unlink(p)
+
     return json_path, srt_path
 
 # -------------------------------------------------------------------
@@ -276,6 +297,20 @@ def step7_render_video(audio_stem: str) -> Path:
     
 
     print(f"[DONE] final: {final_path}")
+
+        # 1) narration mp3
+    safe_unlink(narration_path)
+
+    # 2) concat 전 video
+    safe_unlink(video_path)
+
+    # 3) 장면 클립 디렉토리
+    safe_rmtree(clips_dir)
+
+    # 4) (선택) filled scene plan
+    filled_json = OUTPUT_DIR / f"{audio_stem}_scene_plan_filled.json"
+    safe_unlink(filled_json)
+
     return final_path
 
 # def step7_render_video(audio_stem: str) -> Path:
@@ -340,14 +375,14 @@ def step7_render_video(audio_stem: str) -> Path:
 def main():
     """
     사용법:
-      python main.py full 01   # ✅ 1~7단계 전체 실행
-      python main.py stt 02
-      python main.py rewrite 03
-      python main.py tts 04
-      python main.py stt_ts 04
-      python main.py scene_plan 04
-      python main.py prompts 04
-      python main.py render 04
+    python main.py full 01        # (Termux) 전체 실행
+    python main.py stt 01         # (Termux)
+    python main.py rewrite 01     # (Termux)
+    python main.py tts 01         # ⭐ Codespaces 전용 (TTS만)
+    python main.py stt_ts 01      # (Termux)
+    python main.py scene_plan 01
+    python main.py prompts 01
+    python main.py render 01
     """
     mode = "full"
     number = None
@@ -358,34 +393,22 @@ def main():
     if len(sys.argv) >= 3:
         number = sys.argv[2].strip()
 
-    # 파일 경로 생성
     audio_path, audio_stem = get_audio_paths(number)
 
     print(f"[INFO] 실행 모드: {mode}")
     print(f"[INFO] 선택된 파일: {audio_path}")
 
+    # ------------------------------
+    # 기존 full
+    # ------------------------------
     if mode == "full":
-        # 1) STT
         step1_stt(audio_path)
-
-        # 2) Rewrite
         step2_rewrite(audio_stem)
-
-        # 3) TTS
         step3_tts(audio_stem)
-
-        # 4) Timestamp STT + SRT
         step4_timestamp_stt_from_tts(audio_stem)
-
-        # 5) Scene plan
         step5_build_scene_plan(audio_stem)
-
-        # 6) Prompt fill
         step6_fill_prompts(audio_stem)
-
-        # 7) Render final video
         step7_render_video(audio_stem)
-
         print("[INFO] 전체 플로우(1~7) 완료!")
 
     elif mode == "stt":
@@ -416,26 +439,11 @@ def main():
         step7_render_video(audio_stem)
         print("[INFO] 렌더 완료.")
 
-    elif mode == "thumbnail":
-        print("썸네일에 들어갈 문구를 입력하세요 (1~2줄):")
-
-        lines = []
-        while len(lines) < 2:
-            line = input()
-            if line.strip() == "":
-                break
-            lines.append(line)
-
-        text = "\n".join(lines)
-
-        out = make_thumbnail(audio_stem, text)
-        print(f"[DONE] 썸네일 생성: {out}")
-
-
     else:
         print(
             "사용법:\n"
             "  python main.py full [번호]\n"
+            "  python main.py cs [번호]      # Codespaces 전용 (1~3)\n"
             "  python main.py stt [번호]\n"
             "  python main.py rewrite [번호]\n"
             "  python main.py tts [번호]\n"

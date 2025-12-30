@@ -102,26 +102,25 @@ def script_to_speech(
     script_text: str,
     output_base_path: Path,
     *,
-    # 톤/스타일 기본값 (나중에 main.py에서 바꾸고 싶으면 여기 인자만 조절)
-    emotion_preset: str = "normal",   # normal / happy / sad / angry :contentReference[oaicite:4]{index=4}
-    emotion_intensity: float = 0.8,   # 0.0 ~ 2.0
-    volume: int = 110,                # 0 ~ 200
-    audio_pitch: int = -1,            # -12 ~ +12 (조금 낮게, 진중한 느낌)
-    audio_tempo: float = 1.0,         # 0.5 ~ 2.0
-    audio_format: str = "mp3",        # "wav" 또는 "mp3"
+    emotion_preset: str = "normal",
+    emotion_intensity: float = 0.8,
+    volume: int = 110,
+    audio_pitch: int = -1,
+    audio_tempo: float = 1.0,
+    audio_format: str = "mp3",
+    cleanup: bool = False,   # ⭐ 추가
 ) -> List[Path]:
     """
     Typecast TTS로 스크립트를 여러 파트로 나누어 음성을 생성.
-    길면 base_stem_part1.mp3, part2.mp3 ... 형식으로 저장.
 
-    반환: 생성된 오디오 파일 경로 리스트
+    cleanup=True:
+      - __part*.mp3 파일을 '사용 후 삭제 대상'으로 표시
+      - 실제 삭제는 호출자(main.py)에서 수행
     """
     output_base_path.parent.mkdir(parents=True, exist_ok=True)
 
     chunks = _chunk_text(script_text, max_len=MAX_CHARS_PER_CHUNK)
     print(f"[INFO] Typecast TTS용 텍스트를 {len(chunks)}개 파트로 분할했습니다.")
-    for i, c in enumerate(chunks, start=1):
-        print(f"  - chunk {i}: {len(c)} chars")
 
     result_paths: list[Path] = []
 
@@ -140,7 +139,7 @@ def script_to_speech(
             text=chunk,
             model="ssfm-v21",
             voice_id=TYPECAST_VOICE_ID,
-            language=LanguageCode.KOR,   # 한국어 고정 :contentReference[oaicite:5]{index=5}
+            language=LanguageCode.KOR,
             prompt=Prompt(
                 emotion_preset=emotion_preset,
                 emotion_intensity=emotion_intensity,
@@ -151,7 +150,6 @@ def script_to_speech(
                 audio_tempo=audio_tempo,
                 audio_format=audio_format,
             ),
-            # seed=42  # 항상 동일한 결과를 원하면 seed 고정도 가능
         )
 
         try:
@@ -160,11 +158,19 @@ def script_to_speech(
             print(f"[ERROR] Typecast TTS Error: {e.message} (status={e.status_code})")
             raise
 
-        # SDK는 audio_data 바이트를 반환함 :contentReference[oaicite:6]{index=6}
         with open(out_path, "wb") as f:
             f.write(response.audio_data)
 
         result_paths.append(out_path)
 
     print("[INFO] Typecast TTS 생성 완료.")
+
+    # ⭐ cleanup 메타 정보 출력 (실제 삭제는 main.py에서)
+    if cleanup:
+        print("[CLEANUP] 다음 파일들은 후속 단계에서 삭제 가능합니다:")
+        for p in result_paths:
+            if "__part" in p.name:
+                print("  -", p)
+
     return result_paths
+
